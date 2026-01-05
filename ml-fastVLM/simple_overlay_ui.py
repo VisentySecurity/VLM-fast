@@ -4,24 +4,18 @@ Ultra-Simple FastVLM UI - Just video with VLM output overlaid
 Optimized for Apple Silicon (M4 Mac Mini) based on vLLM CPU optimizations
 """
 
-# Apple Silicon CPU optimizations (based on vLLM best practices)
+# Apple Silicon CPU optimizations (lightweight to avoid video lag)
 # Set these BEFORE importing torch for maximum effect
 import os
-os.environ['OMP_NUM_THREADS'] = str(os.cpu_count() or 8)  # Use all CPU cores
-os.environ['MKL_NUM_THREADS'] = str(os.cpu_count() or 8)  # Intel MKL threads
-os.environ['VECLIB_MAXIMUM_THREADS'] = str(os.cpu_count() or 8)  # Accelerate framework
-os.environ['NUMEXPR_NUM_THREADS'] = str(os.cpu_count() or 8)  # NumExpr threads
-os.environ['TOKENIZERS_PARALLELISM'] = 'true'  # Enable tokenizer parallelism
+# Use fewer threads to avoid video stream lag - leave cores for video processing
+cpu_count = os.cpu_count() or 4
+thread_count = min(cpu_count, 4)  # Limit to 4 threads max
 
-# Set thread affinity for better performance (similar to VLLM_CPU_OMP_THREADS_BIND=auto)
-try:
-    import platform
-    if platform.system() == 'Darwin':  # macOS
-        # Let the system optimize thread binding automatically
-        os.environ['OMP_PROC_BIND'] = 'true'
-        os.environ['OMP_PLACES'] = 'cores'
-except:
-    pass
+os.environ['OMP_NUM_THREADS'] = str(thread_count)
+os.environ['MKL_NUM_THREADS'] = str(thread_count)
+os.environ['VECLIB_MAXIMUM_THREADS'] = str(thread_count)
+os.environ['NUMEXPR_NUM_THREADS'] = str(thread_count)
+os.environ['TOKENIZERS_PARALLELISM'] = 'true'  # Enable tokenizer parallelism
 
 import cv2
 import torch
@@ -92,37 +86,21 @@ def load_model():
         return tokenizer, model, image_processor
 
     try:
-        print("📥 Loading model with Apple Silicon optimizations...")
+        print("📥 Loading model...")
         
-        # Set torch CPU optimizations
-        torch.set_num_threads(os.cpu_count() or 8)
-        torch.set_num_interop_threads(2)  # Inter-op parallelism
+        # Set reasonable thread count (not too aggressive)
+        torch.set_num_threads(min(os.cpu_count() or 4, 4))  # Limit to 4 threads to avoid lag
         
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
         print("✓ Tokenizer loaded")
         
-        # Use float32 for CPU (bfloat16 not well supported on CPU, float16 can be unstable)
-        # For Apple Silicon, float32 is well optimized
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
-            torch_dtype=torch.float32,  # Optimized for Apple Silicon CPU
+            torch_dtype=torch.float32,
             device_map={"": DEVICE.type},
             trust_remote_code=True,
-            low_cpu_mem_usage=True,  # Optimize memory usage
         )
-        
-        # Enable CPU optimizations
         model.eval()
-        
-        # Compile model for better performance (PyTorch 2.0+)
-        try:
-            if hasattr(torch, 'compile'):
-                print("⚡ Compiling model for better performance...")
-                model = torch.compile(model, mode='reduce-overhead', fullgraph=False)
-                print("✓ Model compiled")
-        except Exception as e:
-            print(f"⚠️ Model compilation not available: {e}")
-        
         print("✓ Model loaded")
 
         vision_tower = model.get_vision_tower()
@@ -132,9 +110,7 @@ def load_model():
         print("✓ Vision tower loaded")
 
         model_loaded = True
-        print("✅ Model fully loaded with CPU optimizations!")
-        print(f"   CPU threads: {torch.get_num_threads()}")
-        print(f"   Inter-op threads: {torch.get_num_interop_threads()}")
+        print("✅ Model fully loaded!")
         return tokenizer, model, image_processor
     except Exception as e:
         print(f"❌ Model loading failed: {str(e)}")
@@ -242,12 +218,7 @@ def analyze_frame_sequence(frame_sequence, prompt, max_tokens=50):
         image_tensor = process_images([pil_image], image_processor, model.config)[0]
         image_tensor = image_tensor.to(DEVICE)
 
-        # Optimized generation for Apple Silicon CPU
-        # Use inference_mode for better performance and memory efficiency
         with torch.inference_mode():
-            # Enable CPU optimizations during generation
-            torch.set_grad_enabled(False)  # Ensure no gradients
-            
             output_ids = model.generate(
                 input_ids,
                 images=image_tensor.unsqueeze(0).float(),
@@ -256,11 +227,8 @@ def analyze_frame_sequence(frame_sequence, prompt, max_tokens=50):
                 min_new_tokens=20,
                 do_sample=True,
                 temperature=0.2,
-                use_cache=True,  # KV cache for better performance
+                use_cache=True,
                 pad_token_id=tokenizer.eos_token_id,
-                # CPU-specific optimizations
-                num_beams=1,  # Greedy decoding is faster on CPU
-                early_stopping=True,  # Stop early when possible
             )
 
         input_token_len = input_ids.shape[1]
