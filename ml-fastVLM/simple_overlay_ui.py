@@ -196,44 +196,91 @@ def analyze_frame_sequence(frame_sequence, prompt, max_tokens=50):
         if current_frame is None:
             return "[ERROR] Frame is None"
 
-        tokenizer, model, image_processor = load_model()
+        print(f"🔍 Starting analysis with {sequence_length} frames...")
+        
+        try:
+            tokenizer, model, image_processor = load_model()
+        except Exception as e:
+            error_msg = f"[ERROR] Model loading failed: {str(e)[:60]}"
+            print(f"❌ {error_msg}")
+            return error_msg
 
-        rgb_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGR2RGB)
-        pil_image = Image.fromarray(rgb_frame)
+        try:
+            rgb_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(rgb_frame)
+            print(f"✓ Frame converted: {pil_image.size}")
+        except Exception as e:
+            error_msg = f"[ERROR] Frame conversion failed: {str(e)[:60]}"
+            print(f"❌ {error_msg}")
+            return error_msg
 
         import time
         timestamp = time.strftime("%H:%M:%S")
         enhanced_prompt = f"{prompt}\n\nAnalysis timestamp: {timestamp}. Analyzing {sequence_length} frames.\n\nCRITICAL: Write a DETAILED description first (4-6 sentences). Describe: objects/products visible, layout, people and locations, lighting, movements. THEN assess shoplifting."
 
-        qs = f"{DEFAULT_IMAGE_TOKEN}\n{enhanced_prompt}"
-        messages = [{"role": "user", "content": qs}]
-        prompt_text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-
-        input_ids = tokenizer_image_token(
-            prompt_text, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt"
-        ).unsqueeze(0).to(DEVICE)
-
-        image_tensor = process_images([pil_image], image_processor, model.config)[0]
-        image_tensor = image_tensor.to(DEVICE)
-
-        with torch.inference_mode():
-            output_ids = model.generate(
-                input_ids,
-                images=image_tensor.unsqueeze(0).float(),
-                image_sizes=[pil_image.size],
-                max_new_tokens=max_tokens,
-                min_new_tokens=20,
-                do_sample=True,
-                temperature=0.2,
-                use_cache=True,
-                pad_token_id=tokenizer.eos_token_id,
+        try:
+            qs = f"{DEFAULT_IMAGE_TOKEN}\n{enhanced_prompt}"
+            messages = [{"role": "user", "content": qs}]
+            prompt_text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
             )
+            print(f"✓ Prompt prepared: {len(prompt_text)} chars")
+        except Exception as e:
+            error_msg = f"[ERROR] Prompt preparation failed: {str(e)[:60]}"
+            print(f"❌ {error_msg}")
+            return error_msg
 
-        input_token_len = input_ids.shape[1]
-        generated_ids = output_ids[:, input_token_len:]
-        response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        try:
+            input_ids = tokenizer_image_token(
+                prompt_text, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt"
+            ).unsqueeze(0).to(DEVICE)
+            print(f"✓ Tokenized: {input_ids.shape}")
+        except Exception as e:
+            error_msg = f"[ERROR] Tokenization failed: {str(e)[:60]}"
+            print(f"❌ {error_msg}")
+            return error_msg
+
+        try:
+            image_tensor = process_images([pil_image], image_processor, model.config)[0]
+            image_tensor = image_tensor.to(DEVICE)
+            print(f"✓ Image processed: {image_tensor.shape if hasattr(image_tensor, 'shape') else 'OK'}")
+        except Exception as e:
+            error_msg = f"[ERROR] Image processing failed: {str(e)[:60]}"
+            print(f"❌ {error_msg}")
+            return error_msg
+
+        try:
+            print(f"🔍 Generating response (max_tokens={max_tokens})...")
+            with torch.inference_mode():
+                # Use simpler generation parameters to avoid failures
+                output_ids = model.generate(
+                    input_ids,
+                    images=image_tensor.unsqueeze(0).float(),
+                    image_sizes=[pil_image.size],
+                    max_new_tokens=max_tokens,
+                    min_new_tokens=5,  # Very low to avoid generation failures
+                    do_sample=False,  # Greedy decoding is more reliable
+                    temperature=0.7,  # Only used if do_sample=True, but set anyway
+                    use_cache=True,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+            print(f"✓ Generation complete: {output_ids.shape}")
+        except Exception as e:
+            error_msg = f"[ERROR] Generation failed: {str(e)[:80]}"
+            print(f"❌ {error_msg}")
+            import traceback
+            print(traceback.format_exc())
+            return error_msg
+
+        try:
+            input_token_len = input_ids.shape[1]
+            generated_ids = output_ids[:, input_token_len:]
+            response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+            print(f"✓ Response decoded: {len(response)} chars")
+        except Exception as e:
+            error_msg = f"[ERROR] Response decoding failed: {str(e)[:60]}"
+            print(f"❌ {error_msg}")
+            return error_msg
 
         response = response.strip()
         while response and response[0] in (',', '.', ' ', '\n', '\t'):
@@ -242,6 +289,7 @@ def analyze_frame_sequence(frame_sequence, prompt, max_tokens=50):
         if not response or len(response) < 10:
             response = f"Scene appears normal. {response}" if response else "Analysis completed - scene appears normal."
 
+        print(f"✅ Analysis complete: {len(response)} chars")
         return f"[{timestamp}] {response}"
     except torch.cuda.OutOfMemoryError:
         error_msg = "[ERROR] GPU memory full - try restarting"
