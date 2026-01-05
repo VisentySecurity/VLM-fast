@@ -1,0 +1,6 @@
+{
+  "do_sample": true,
+  "temperature": null,
+  "top_p": null,
+  "transformers_version": "4.39.3"
+}
